@@ -1,0 +1,58 @@
+@prefix : <https://nomad-lab.eu/onto/xps#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix ns1: <http://qudt.org/schema/qudt/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+prov:startedAtTime a owl:DatatypeProperty .
+
+prov:wasAssociatedWith a owl:ObjectProperty .
+
+<https://nomad-lab.eu/onto/xps> a owl:Ontology .
+
+prov:generated a owl:ObjectProperty .
+
+prov:used a owl:ObjectProperty .
+
+prov:wasGeneratedBy a owl:ObjectProperty .
+
+:AlKAlphaEnergy a ns1:QuantityValue,
+        owl:NamedIndividual ;
+    dcterms:title "Al K-alpha excitation energy"^^xsd:string ;
+    ns1:hasQuantityKind <http://qudt.org/vocab/quantitykind/Energy> ;
+    ns1:hasUnit <http://qudt.org/vocab/unit/EV> ;
+    ns1:numericValue 1486.6 .
+
+:AlKAlphaXpsMeasurement a owl:Class ;
+    dcterms:title "Al K-alpha XPS measurement"^^xsd:string ;
+    rdfs:subClassOf [ a owl:Restriction ;
+            owl:hasValue :AlKAlphaEnergy ;
+            owl:onProperty ns1:quantityValue ],
+        [ a owl:Restriction ;
+            owl:onProperty prov:used ;
+            owl:someValuesFrom prov:Entity ],
+        [ a owl:Restriction ;
+            owl:allValuesFrom :Spectrum ;
+            owl:onProperty prov:generated ],
+        [ a owl:Restriction ;
+            owl:onClass ns1:QuantityValue ;
+            owl:onProperty ns1:quantityValue ;
+            owl:qualifiedCardinality "1"^^xsd:nonNegativeInteger ],
+        owl:Thing,
+        prov:Activity .
+
+:Spectrum a owl:Class ;
+    dcterms:title "XPS spectrum"^^xsd:string ;
+    rdfs:subClassOf owl:Thing,
+        dcat:Dataset,
+        prov:Entity ;
+    owl:equivalentClass [ a owl:Class ;
+            owl:intersectionOf ( prov:Entity dcat:Dataset [ a owl:Restriction ;
+                        owl:onProperty prov:wasGeneratedBy ;
+                        owl:someValuesFrom :AlKAlphaXpsMeasurement ] ) ] .
+
+ns1:quantityValue a owl:ObjectProperty .
