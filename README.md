@@ -8,14 +8,17 @@
 > transform the assigned `Quantity` object. An undecorated class or attribute emits
 > no ontology entity.
 
-## 1. Introduction
+## 1. Introduction and decorator API
 
-NOMAD Semantic Mapper adds an explicit OWL mapping grammar to ordinary NOMAD
-schemas. A schema author attaches `OntologyMap([...])` to a section or wraps any
-assigned definition—`Quantity`, `SubSection`, `DataFrame`, or another object.
+The mapper is a declarative Python-to-OWL compiler. `OntologyMap` can annotate a
+Python class or wrap any assigned Python expression. It does not depend on NOMAD's
+runtime model: the compiler reads Python syntax without importing or executing the
+input file. NOMAD `MSection`, `Quantity`, `SubSection`, and `DataFrame` definitions
+are important consumers of the API, but they are not required to understand or use
+the decorator grammar.
 
 ```text
-NOMAD schema + declarative decorators
+Python source + declarative OntologyMap calls
         │
         ├─ load and compile the Python AST (the schema is never executed)
         ├─ reason with HermiT or Pellet
@@ -29,9 +32,104 @@ backend Python statements. The single [nomad_semantic_mapper.py](nomad_semantic_
 file provides the inert decorators, AST compiler, validator, reasoner integration,
 code generator, and command-line interface.
 
-### 1.1 The core rule
+### 1.1 SDK-style quickstart without NOMAD
 
-Python supplies only a local handle. The decorator supplies all semantics.
+The complete call shape is:
+
+```python
+OntologyMap([
+    Declaration(iri="absolute IRI", option="value"),  # exactly one
+    Operation(option="value"),                         # zero or more
+    Operation(option="value"),
+])(python_target)
+```
+
+For a Python class, use the same object as a decorator. For an attribute, wrap its
+assigned expression. This framework-independent file exercises both forms:
+
+```python
+from nomad_semantic_mapper import (
+    Annotation,
+    Class,
+    DataProperty,
+    Fact,
+    Individual,
+    ObjectProperty,
+    OntologyMap,
+    SubClassOf,
+)
+
+
+class SemanticHandles:
+    # The attribute is an OWL class handle, even though object() is not a class.
+    dataset_kind = OntologyMap([
+        Class(iri="https://example.org/lab#DatasetKind"),
+        SubClassOf(iri="http://www.w3.org/ns/dcat#Dataset"),
+    ])(object())
+
+    # The attribute is an OWL object-property handle.
+    source = OntologyMap([
+        ObjectProperty(iri="http://www.w3.org/ns/prov#wasDerivedFrom"),
+    ])(object())
+
+    # The attribute is an OWL datatype-property handle.
+    identifier = OntologyMap([
+        DataProperty(
+            iri="https://example.org/lab#identifier",
+            domain=["dataset_kind"],
+            range=["xsd:string"],
+        ),
+    ])(object())
+
+    # The attribute is a named OWL individual with an assertion.
+    run_001 = OntologyMap([
+        Individual(
+            iri="https://example.org/lab#run-001",
+            type="http://www.w3.org/ns/prov#Activity",
+        ),
+        Fact(
+            property="http://www.w3.org/ns/prov#used",
+            value="https://example.org/lab#sample-001",
+        ),
+        Annotation(property="label", literal="Run 001"),
+    ])(object())
+
+
+# A Python class can also be the mapping handle.
+@OntologyMap([
+    Class(iri="https://example.org/lab#Workflow"),
+    SubClassOf(iri="http://www.w3.org/ns/prov#Activity"),
+])
+class Workflow:
+    pass
+```
+
+Compile this ordinary Python file exactly like a NOMAD schema:
+
+```bash
+python nomad_semantic_mapper.py semantic_model.py build/model \
+  --pipeline --reasoner hermit --base-iri https://example.org/lab
+```
+
+The important API behavior is summarized below.
+
+| API element | Contract |
+| --- | --- |
+| `OntologyMap(operations)` | Accepts one literal list of declarative grammar calls |
+| first declaration | Determines whether the handle is a class, individual, or property |
+| later operations | Add axioms, restrictions, facts, equality, or annotations |
+| `(...)(python_target)` | Returns/wraps the Python target while syntax supplies a mapping handle |
+| `@OntologyMap(...)` | Uses a Python class name as the handle; class semantics still come only from the list |
+| local string reference | Resolves another mapped handle, for example `"dataset_kind"` |
+| absolute IRI reference | Reuses or relates to an external ontology term |
+| generated output | Owlready2 Python, Turtle RDF, and a validation report |
+
+The mapper wraps Owlready2 internally. Users never write Owlready2 classes,
+statements, or raw backend code in `OntologyMap`.
+
+### 1.2 Applying the same API to a NOMAD schema
+
+Python supplies only a local handle. The mapping list supplies all semantics.
 
 ```python
 @OntologyMap([
@@ -55,7 +153,7 @@ class Sample(MSection):
 No field name is special. `system`, `sample`, `temperature`, and every other
 assignment follow the same rule.
 
-### 1.2 Install
+### 1.3 Install
 
 ```bash
 python -m pip install owlready2 rdflib
@@ -64,7 +162,7 @@ python -m pip install owlready2 rdflib
 Generating Python needs no NOMAD installation because the mapper reads the schema's
 AST rather than importing it. Executing the schema itself still needs NOMAD.
 
-### 1.3 One-output commands
+### 1.4 One-output commands
 
 ```bash
 python nomad_semantic_mapper.py examples/xps_measurement.schema.py ontology.py \
@@ -74,7 +172,7 @@ python nomad_semantic_mapper.py examples/xps_measurement.schema.py ontology.ttl 
   --to ttl --base-iri https://nomad-lab.eu/onto/xps
 ```
 
-### 1.4 Staged pipeline
+### 1.5 Staged pipeline
 
 ```bash
 python nomad_semantic_mapper.py examples/xps_measurement.schema.py build/xps \
@@ -237,328 +335,563 @@ ontology imports/version declarations, and standalone general class axioms.
 The mapper intentionally has no arbitrary backend-code operation. New capabilities
 must be added as named grammar, compiler logic, tests, documentation, and examples.
 
-## 3. Examples
+## 3. Example catalog: attribute semantics first
 
-Fourteen executable examples intentionally vary where mappings are placed and which
-semantic structures dominate:
+### 3.1 Read this before the examples
 
-| Placement pattern | Internal/local mapping | External mapping | Cross-map/domain-range | Example |
-| --- | --- | --- | --- | --- |
-| class and attributes | local classes and properties | PROV classes/properties | local handles in domain/range | [class_and_attributes.schema.py](examples/class_and_attributes.schema.py) |
-| class only | local class hierarchy | external PROV superclass | internal `SubClassOf` handle | [class_only.schema.py](examples/class_only.schema.py) |
-| attributes only | local properties | reused `prov:used` | external domain/range and no-domain variants | [attributes_only.schema.py](examples/attributes_only.schema.py) |
-| subsection and child attributes | local subsection/value properties | QUDT/PROV reuse | parent/child handles in domain/range | [subsections_and_attributes.schema.py](examples/subsections_and_attributes.schema.py) |
-| minimal onboarding | local class/property | external BFO superclass | declaration keywords | [simple_sample.schema.py](examples/simple_sample.schema.py) |
-| observation model | local SOSA-specialized classes | SOSA and QUDT | restrictions over mapped fields | [sensor_observation.schema.py](examples/sensor_observation.schema.py) |
-| advanced OWL grammar | local family ontology | standard OWL/XSD terms | scoped cross-references | [owl_axioms.schema.py](examples/owl_axioms.schema.py) |
-| scientific workflow | three local XPS entities | PROV/DCAT/QUDT/DCTERMS | nested restrictions and expressions | [xps_measurement.schema.py](examples/xps_measurement.schema.py) |
-| class hierarchy only | four explicit local classes | PROV, BFO, and DCAT superclasses | internal and external subclass edges | [class_hierarchy.schema.py](examples/class_hierarchy.schema.py) |
-| sections as relation endpoints | Experiment, Instrument, Sample, Result | PROV/DCAT superclasses | sections used as domain/range classes | [section_object_relations.schema.py](examples/section_object_relations.schema.py) |
-| defined classes | acquisitions and research resources | PROV/DCAT alignment | intersection, union, complement | [defined_classes.schema.py](examples/defined_classes.schema.py) |
-| property ontology | assembly relation family | OWL characteristics | hierarchy, inverse, chain, domain/range | [property_axioms.schema.py](examples/property_axioms.schema.py) |
-| datatype restrictions | temperature record classes | XSD datatypes | universal/value/cardinality restrictions | [data_restrictions.schema.py](examples/data_restrictions.schema.py) |
-| individuals and facts | runs and instruments | PROV alignment | facts, types, same/different individuals | [individuals_and_facts.schema.py](examples/individuals_and_facts.schema.py) |
-
-### 3.1 Simple — material sample and identifier
-
-The developer wants to say: “A NOMAD `Sample` represents a material entity, and its
-identifier is a functional string-valued property.” Neither the Python class nor the
-`Quantity` implies OWL semantics; both declarations are explicit.
-
-Executable schema: [examples/simple_sample.schema.py](examples/simple_sample.schema.py)
+**Attribute-level mapping is the primary use case.** In this catalog, 15 of the 20
+examples map attributes and five focus on classes. The placement has exact meaning:
 
 ```python
-from nomad.metainfo import MSection, Quantity
-from nomad_semantic_mapper import *
+temperature = OntologyMap([DataProperty(iri="https://example.org/temperature")])(
+    Quantity(type=float)
+)
+```
 
-@OntologyMap([
-    # Usage: explicitly create the semantic class and connect it to BFO.
-    Class(iri="https://nomad-lab.eu/onto/examples#Sample"),
-    SubClassOf(iri="http://purl.obolibrary.org/obo/BFO_0000040"),
-    Annotation(property="http://purl.org/dc/terms/title", literal="material sample"),
-])
-class Sample(MSection):
-    sample_id = OntologyMap([
-        # Usage: Quantity is ignored; this list explicitly creates the OWL property.
+| Part | What the mapper does |
+| --- | --- |
+| `temperature` | Uses this Python attribute name as the local mapping handle |
+| `OntologyMap([...])` | Reads this list as the complete semantic declaration |
+| `DataProperty(...)` | Declares the IRI as an OWL datatype property |
+| `Quantity(type=float)` | Leaves this as NOMAD schema grammar; it is **not** mapped |
+| containing Python class | Emits no OWL class unless that class has its own `OntologyMap` |
+
+This remains true for `Quantity`, `SubSection`, `DataFrame`, and any other assigned
+object. The mapper attaches semantics to the **attribute**, never to the object on
+the right-hand side. Attribute names such as `system`, `atoms`, `results`, and
+`temperature` have no built-in behavior.
+
+The examples use these prefixes:
+
+```turtle
+@prefix ex:   <https://nomad-lab.eu/onto/readme#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+```
+
+### 3.2 Attribute-level examples (15)
+
+An attribute handle is not limited to an OWL property. Its mapping list may declare
+a `Class`, `Individual`, `ObjectProperty`, `DataProperty`, or
+`AnnotationProperty`, followed by every operation compatible with that declaration.
+The Python value on the right remains unrelated to the declared OWL entity kind.
+
+#### A1 — declare an external object property: reuse `prov:used`
+
+**Use case.** A record says which existing entity an activity used. The NOMAD field
+may be implemented as a `Quantity`; the semantic attribute is still the published
+PROV object property.
+
+| Mapping decision | Value |
+| --- | --- |
+| Property | `prov:used` |
+| Kind | object property |
+| Local term minted | no |
+
+```python
+class Process(MSection):
+    input_entity = OntologyMap([
+        ObjectProperty(iri="http://www.w3.org/ns/prov#used"),
+    ])(Quantity(type=str))
+```
+
+```turtle
+prov:used a owl:ObjectProperty .
+```
+
+No OWL class named `Process` is generated.
+
+#### A2 — declare an external object property on a subsection: reuse `prov:generated`
+
+**Use case.** A repeating NOMAD subsection contains results generated by an
+activity. Mapping the attribute declares `prov:generated`; it does not turn the
+`SubSection` object into an ontology entity.
+
+```python
+class Process(MSection):
+    results = OntologyMap([
+        ObjectProperty(iri="http://www.w3.org/ns/prov#generated"),
+    ])(SubSection(sub_section="Result", repeats=True))
+```
+
+```turtle
+prov:generated a owl:ObjectProperty .
+```
+
+#### A3 — declare a class and subclass axiom on an attribute
+
+**Use case.** A schema attribute acts as the handle for the project concept
+`SampleKind`, explicitly aligned with `prov:Entity`. The assigned `Quantity` does
+not become an OWL class; the `Class` declaration does.
+
+| Independent semantic specification | Value |
+| --- | --- |
+| entity kind | OWL class |
+| local class | `ex:SampleKind` |
+| superclass | `prov:Entity` |
+
+```python
+class VocabularySection(MSection):
+    sample_kind = OntologyMap([
+        Class(iri="https://nomad-lab.eu/onto/readme#SampleKind"),
+        SubClassOf(iri="http://www.w3.org/ns/prov#Entity"),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:SampleKind a owl:Class ;
+    rdfs:subClassOf prov:Entity .
+```
+
+#### A4 — declare an equivalent class with a restriction on an attribute
+
+**Use case.** The `publishable_dataset_kind` attribute defines a class equivalent to
+a DCAT dataset that has at least one DCAT distribution. A sibling attribute supplies
+the local handle used by the restriction.
+
+```python
+class VocabularySection(MSection):
+    distribution = OntologyMap([
+        ObjectProperty(iri="http://www.w3.org/ns/dcat#distribution"),
+    ])(SubSection(sub_section="Distribution", repeats=True))
+
+    publishable_dataset_kind = OntologyMap([
+        Class(iri="https://nomad-lab.eu/onto/readme#PublishableDatasetKind"),
+        EquivalentTo(expression=IntersectionOf(operands=[
+            "http://www.w3.org/ns/dcat#Dataset",
+            SomeValuesFrom(
+                property="distribution",
+                filler="http://www.w3.org/ns/dcat#Distribution",
+            ),
+        ])),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:PublishableDatasetKind a owl:Class ;
+    owl:equivalentClass [ a owl:Class ; owl:intersectionOf (
+        dcat:Dataset
+        [ a owl:Restriction ; owl:onProperty dcat:distribution ;
+          owl:someValuesFrom dcat:Distribution ]
+    ) ] .
+```
+
+#### A5 — declare an individual and object-property fact on an attribute
+
+**Use case.** An attribute declares a named acquisition run as a PROV activity and
+asserts that it used a real external sample resource IRI.
+
+```python
+class RunRegistry(MSection):
+    run_001 = OntologyMap([
+        Individual(
+            iri="https://nomad-lab.eu/onto/readme#run-001",
+            type="http://www.w3.org/ns/prov#Activity",
+        ),
+        Fact(
+            property="http://www.w3.org/ns/prov#used",
+            value="https://www.wikidata.org/entity/Q28816538",
+        ),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:run-001 a owl:NamedIndividual, prov:Activity ;
+    prov:used <https://www.wikidata.org/entity/Q28816538> .
+```
+
+#### A6 — add type, equality, and inequality assertions to an attribute individual
+
+**Use case.** A registered instrument is a PROV entity, is known to be the same as
+one external identifier, and different from another instrument.
+
+```python
+class InstrumentRegistry(MSection):
+    instrument_alpha = OntologyMap([
+        Individual(
+            iri="https://nomad-lab.eu/onto/readme#instrument-alpha",
+            type="http://www.w3.org/ns/sosa/Sensor",
+        ),
+        Type(iri="http://www.w3.org/ns/prov#Entity"),
+        SameAs(iri="https://example.org/instruments/alpha"),
+        DifferentFrom(iri="https://example.org/instruments/beta"),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:instrument-alpha a owl:NamedIndividual, sosa:Sensor, prov:Entity ;
+    owl:sameAs <https://example.org/instruments/alpha> ;
+    owl:differentFrom <https://example.org/instruments/beta> .
+```
+
+#### A7 — declare a subproperty with external domain and range on an attribute
+
+**Use case.** The project needs a precise calibration association while preserving
+interoperability with the broader PROV association relation.
+
+```python
+class CalibrationRecord(MSection):
+    calibrated_by = OntologyMap([
+        ObjectProperty(
+            iri="https://nomad-lab.eu/onto/readme#calibratedBy",
+            domain=["http://www.w3.org/ns/sosa/Observation"],
+            range=["http://www.w3.org/ns/prov#Agent"],
+        ),
+        SubPropertyOf(iri="http://www.w3.org/ns/prov#wasAssociatedWith"),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:calibratedBy a owl:ObjectProperty ;
+    rdfs:subPropertyOf prov:wasAssociatedWith ;
+    rdfs:domain sosa:Observation ;
+    rdfs:range prov:Agent .
+```
+
+#### A8 — declare an inverse-property axiom on an attribute
+
+**Use case.** A project relation reads in the opposite direction from `prov:used`.
+
+```python
+class ProvenanceRelations(MSection):
+    was_input_to = OntologyMap([
+        ObjectProperty(iri="https://nomad-lab.eu/onto/readme#wasInputTo"),
+        InverseOf(iri="http://www.w3.org/ns/prov#used"),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:wasInputTo a owl:ObjectProperty ;
+    owl:inverseOf prov:used .
+```
+
+#### A9 — declare a property-chain axiom on an attribute
+
+**Use case.** Repeating PROV derivation twice implies a project-level indirect
+derivation relation.
+
+```python
+class ProvenanceRelations(MSection):
+    was_indirectly_derived_from = OntologyMap([
+        ObjectProperty(
+            iri="https://nomad-lab.eu/onto/readme#wasIndirectlyDerivedFrom"
+        ),
+        PropertyChain(properties=[
+            "http://www.w3.org/ns/prov#wasDerivedFrom",
+            "http://www.w3.org/ns/prov#wasDerivedFrom",
+        ]),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:wasIndirectlyDerivedFrom a owl:ObjectProperty ;
+    owl:propertyChainAxiom (
+        prov:wasDerivedFrom prov:wasDerivedFrom
+    ) .
+```
+
+#### A10 — declare an external datatype property on an attribute
+
+**Use case.** An observation records the instant at which its result became
+available. `sosa:resultTime` is reused directly as an OWL datatype property.
+
+```python
+class ObservationRecord(MSection):
+    result_time = OntologyMap([
+        DataProperty(iri="http://www.w3.org/ns/sosa/resultTime"),
+    ])(Quantity(type=str))
+```
+
+```turtle
+sosa:resultTime a owl:DatatypeProperty .
+```
+
+#### A11 — declare a functional datatype property with domain and range
+
+**Use case.** A local laboratory identifier applies to PROV entities and contains a
+string. The NOMAD `type=str` does not create the RDF range; `range=["xsd:string"]`
+does.
+
+```python
+class AnyRecord(MSection):
+    laboratory_id = OntologyMap([
         DataProperty(
-            iri="https://nomad-lab.eu/onto/examples#sampleId",
+            iri="https://nomad-lab.eu/onto/readme#laboratoryId",
             characteristics=["FunctionalProperty"],
-            domain=["Sample"],
+            domain=["http://www.w3.org/ns/prov#Entity"],
             range=["xsd:string"],
         ),
     ])(Quantity(type=str))
 ```
 
-Representative Turtle:
-
 ```turtle
-:Sample a owl:Class ;
-    rdfs:subClassOf <http://purl.obolibrary.org/obo/BFO_0000040> .
-:sampleId a owl:DatatypeProperty, owl:FunctionalProperty ;
-    rdfs:domain :Sample ; rdfs:range xsd:string .
+ex:laboratoryId a owl:DatatypeProperty, owl:FunctionalProperty ;
+    rdfs:domain prov:Entity ;
+    rdfs:range xsd:string .
 ```
 
-### 3.2 Advanced — external-first XPS measurement
+#### A12 — declare and annotate an annotation property on an attribute
 
-The developer wants to say: “An Al K-alpha XPS measurement is a PROV activity that
-uses a sample, generates only XPS spectra, has exactly one QUDT excitation-energy
-value, and records its operator and start time with published properties.” Only
-three project terms are minted; the rest are PROV, DCAT, DCTERMS, and QUDT IRIs.
-
-Executable schema: [examples/xps_measurement.schema.py](examples/xps_measurement.schema.py)
+**Use case.** The project introduces a reusable annotation for human review notes
+and labels the annotation property itself.
 
 ```python
-@OntologyMap([
-    Class(iri="https://nomad-lab.eu/onto/xps#AlKAlphaXpsMeasurement"),
-    SubClassOf(iri="http://www.w3.org/ns/prov#Activity"),
-    # Usage: require at least one used PROV entity.
-    SomeValuesFrom(property="sample", filler="http://www.w3.org/ns/prov#Entity"),
-    # Usage: every generated result must be our Spectrum class.
-    AllValuesFrom(property="spectrum", filler="Spectrum"),
-    ExactCardinality(
-        property="excitation_energy", count=1,
-        filler="http://qudt.org/schema/qudt/QuantityValue",
-    ),
-    HasValue(property="excitation_energy", value="AlKAlphaEnergy"),
-])
-class AlKAlphaXpsMeasurement(MSection):
-    sample = OntologyMap([
-        # Direct one-to-one reuse; no local property is minted.
-        ObjectProperty(iri="http://www.w3.org/ns/prov#used"),
+class DocumentationTerms(MSection):
+    review_note = OntologyMap([
+        AnnotationProperty(iri="https://nomad-lab.eu/onto/readme#reviewNote"),
+        Annotation(property="label", literal="review note"),
     ])(Quantity(type=str))
-    spectrum = OntologyMap([
-        ObjectProperty(iri="http://www.w3.org/ns/prov#generated"),
-    ])(SubSection(sub_section="Spectrum"))
 ```
 
-Representative Turtle:
+```turtle
+ex:reviewNote a owl:AnnotationProperty ;
+    rdfs:label "review note" .
+```
+
+#### A13 — declare a disjoint-class axiom on an attribute
+
+**Use case.** An attribute declares a result class that is a PROV entity and cannot
+also be a PROV activity.
+
+```python
+class ResultVocabulary(MSection):
+    result_kind = OntologyMap([
+        Class(iri="https://nomad-lab.eu/onto/readme#ResultKind"),
+        SubClassOf(iri="http://www.w3.org/ns/prov#Entity"),
+        DisjointWith(iri="http://www.w3.org/ns/prov#Activity"),
+    ])(Quantity(type=str))
+```
 
 ```turtle
-:AlKAlphaXpsMeasurement a owl:Class ;
+ex:ResultKind a owl:Class ;
+    rdfs:subClassOf prov:Entity ;
+    owl:disjointWith prov:Activity .
+```
+
+#### A14 — declare cardinality and all-values restrictions on an attribute class
+
+**Use case.** An attribute declares a controlled activity class that uses exactly
+one PROV entity and whose generated values are all PROV entities.
+
+| Class axiom | Declarative operation |
+| --- | --- |
+| exactly one input entity | `ExactCardinality` |
+| only entity outputs | `AllValuesFrom` |
+
+```python
+class ActivityVocabulary(MSection):
+    controlled_activity = OntologyMap([
+        Class(iri="https://nomad-lab.eu/onto/readme#ControlledActivity"),
+        SubClassOf(iri="http://www.w3.org/ns/prov#Activity"),
+        ExactCardinality(
+            property="http://www.w3.org/ns/prov#used",
+            count=1,
+            filler="http://www.w3.org/ns/prov#Entity",
+        ),
+        AllValuesFrom(
+            property="http://www.w3.org/ns/prov#generated",
+            filler="http://www.w3.org/ns/prov#Entity",
+        ),
+    ])(Quantity(type=str))
+```
+
+```turtle
+ex:ControlledActivity a owl:Class ;
     rdfs:subClassOf prov:Activity,
         [ a owl:Restriction ; owl:onProperty prov:used ;
-          owl:someValuesFrom prov:Entity ],
+          owl:onClass prov:Entity ; owl:qualifiedCardinality 1 ],
         [ a owl:Restriction ; owl:onProperty prov:generated ;
-          owl:allValuesFrom :Spectrum ],
-        [ a owl:Restriction ; owl:onProperty qudt:quantityValue ;
-          owl:onClass qudt:QuantityValue ; owl:qualifiedCardinality 1 ] .
+          owl:allValuesFrom prov:Entity ] .
 ```
 
-The complete generated graph is [ontology.ttl](ontology.ttl).
+#### A15 — declare n-ary individual inequality on an attribute
 
-### 3.3 Complex — composed expressions and axiom families
+**Use case.** An attribute declares one named sensor and states that it and two
+external sensor resources are mutually different.
 
-The developer wants a family vocabulary containing a guardian as the intersection
-of a person and a parental restriction, an age group as a union, a non-adult as a
-complement, an enumerated family, inverse/chained properties, cardinality/self
-restrictions, and equality/inequality assertions.
+```python
+class InstrumentRegistry(MSection):
+    sensor_alpha = OntologyMap([
+        Individual(
+            iri="https://nomad-lab.eu/onto/readme#sensor-alpha",
+            type="http://www.w3.org/ns/sosa/Sensor",
+        ),
+        AllDifferent(individuals=[
+            "https://example.org/instruments/sensor-beta",
+            "https://example.org/instruments/sensor-gamma",
+        ]),
+    ])(Quantity(type=str))
+```
 
-Executable schema: [examples/owl_axioms.schema.py](examples/owl_axioms.schema.py)
+```turtle
+[] a owl:AllDifferent ;
+   owl:distinctMembers (
+       ex:sensor-alpha
+       <https://example.org/instruments/sensor-beta>
+       <https://example.org/instruments/sensor-gamma>
+   ) .
+```
+
+### 3.3 Class-level examples (5)
+
+Class decorators are used only when an OWL class, individual, or class axiom is
+actually required. A Python class declaration and Python inheritance remain
+semantically inert.
+
+#### C1 — explicitly align a section with PROV Activity
+
+**Use case.** An XPS acquisition is modeled as a kind of PROV activity.
 
 ```python
 @OntologyMap([
-    Class(iri="https://example.org/family#Guardian"),
-    # Usage: compose a named class and a nested existential restriction.
+    Class(iri="https://nomad-lab.eu/onto/readme#XpsAcquisition"),
+    SubClassOf(iri="http://www.w3.org/ns/prov#Activity"),
+])
+class XpsAcquisition(MSection):
+    pass
+```
+
+```turtle
+ex:XpsAcquisition a owl:Class ;
+    rdfs:subClassOf prov:Activity .
+```
+
+#### C2 — explicitly align a section with DCAT Dataset
+
+**Use case.** A Python section stores processed data and is intentionally declared
+as a DCAT dataset.
+
+```python
+@OntologyMap([
+    Class(iri="https://nomad-lab.eu/onto/readme#ProcessedDataset"),
+    SubClassOf(iri="http://www.w3.org/ns/dcat#Dataset"),
+])
+class ProcessedDataset(MSection):
+    pass
+```
+
+```turtle
+ex:ProcessedDataset a owl:Class ;
+    rdfs:subClassOf dcat:Dataset .
+```
+
+#### C3 — internal subclass handle plus external alignment
+
+**Use case.** A local XPS result is a local experimental result, and that parent is
+aligned with `prov:Entity`. Both ontology edges are explicit; Python inheritance is
+irrelevant.
+
+```python
+@OntologyMap([
+    Class(iri="https://nomad-lab.eu/onto/readme#ExperimentalResult"),
+    SubClassOf(iri="http://www.w3.org/ns/prov#Entity"),
+])
+class ExperimentalResult(MSection):
+    pass
+
+@OntologyMap([
+    Class(iri="https://nomad-lab.eu/onto/readme#XpsResult"),
+    SubClassOf(iri="ExperimentalResult"),
+])
+class XpsResult(MSection):
+    pass
+```
+
+```turtle
+ex:ExperimentalResult a owl:Class ; rdfs:subClassOf prov:Entity .
+ex:XpsResult a owl:Class ; rdfs:subClassOf ex:ExperimentalResult .
+```
+
+#### C4 — define a class with an attribute property restriction
+
+**Use case.** A publishable dataset is exactly a DCAT dataset having at least one
+distribution. The attribute declares the property handle; the class decorator uses
+that handle in an OWL class expression.
+
+```python
+@OntologyMap([
+    Class(iri="https://nomad-lab.eu/onto/readme#PublishableDataset"),
     EquivalentTo(expression=IntersectionOf(operands=[
-        "Person",
-        SomeValuesFrom(property="Person.parent_of", filler="Person"),
+        "http://www.w3.org/ns/dcat#Dataset",
+        SomeValuesFrom(
+            property="distribution",
+            filler="http://www.w3.org/ns/dcat#Distribution",
+        ),
     ])),
 ])
-class Guardian(MSection):
-    pass
-
-@OntologyMap([
-    Class(iri="https://example.org/family#AgeGroup"),
-    EquivalentTo(expression=UnionOf(operands=["Adult", "Minor"])),
-])
-class AgeGroup(MSection):
-    pass
-
-@OntologyMap([
-    Individual(iri="https://example.org/family#alice", type="Adult"),
-    Fact(property="Person.parent_of", value="Bob"),
-    Fact(property="Person.age", literal=42),
-    SameAs(iri="AliceAlias"),
-    AllDifferent(individuals=["Bob", "Charlie"]),
-])
-class Alice(MSection):
-    pass
+class PublishableDataset(MSection):
+    distribution = OntologyMap([
+        ObjectProperty(iri="http://www.w3.org/ns/dcat#distribution"),
+    ])(SubSection(sub_section="Distribution", repeats=True))
 ```
-
-Representative Turtle:
 
 ```turtle
-:Guardian owl:equivalentClass [
-    owl:intersectionOf ( :Person [ a owl:Restriction ;
-        owl:onProperty :parentOf ; owl:someValuesFrom :Person ] )
-] .
-:AgeGroup owl:equivalentClass [ owl:unionOf ( :Adult :Minor ) ] .
-:FamilyMembers owl:equivalentClass [ owl:oneOf ( :alice :bob :charlie ) ] .
-:grandparentOf owl:propertyChainAxiom ( :parentOf :parentOf ) .
+ex:PublishableDataset a owl:Class ;
+    owl:equivalentClass [ a owl:Class ; owl:intersectionOf (
+        dcat:Dataset
+        [ a owl:Restriction ; owl:onProperty dcat:distribution ;
+          owl:someValuesFrom dcat:Distribution ]
+    ) ] .
 ```
 
-#### Coverage across the executable examples
+#### C5 — state class disjointness
 
-| Supported operation | Demonstrated in |
+**Use case.** A project result is a PROV entity and must not also be a PROV
+activity.
+
+```python
+@OntologyMap([
+    Class(iri="https://nomad-lab.eu/onto/readme#ResultEntity"),
+    SubClassOf(iri="http://www.w3.org/ns/prov#Entity"),
+    DisjointWith(iri="http://www.w3.org/ns/prov#Activity"),
+])
+class ResultEntity(MSection):
+    pass
+```
+
+```turtle
+ex:ResultEntity a owl:Class ;
+    rdfs:subClassOf prov:Entity ;
+    owl:disjointWith prov:Activity .
+```
+
+### 3.4 Executable examples and full grammar coverage
+
+The short examples above are designed for onboarding. The repository also contains
+fourteen complete schemas that can be passed directly to the mapper:
+
+| Focus | Executable example |
 | --- | --- |
-| `Class`, `ObjectProperty`, `DataProperty`, `Individual`, `AnnotationProperty` | simple description, XPS, sensor, complex |
-| `SubClassOf`, `EquivalentTo`, `DisjointWith`, `AllDisjoint` | XPS and complex |
-| `SubPropertyOf`, `InverseOf`, `Domain`, `Range`, `PropertyChain` | complex |
-| `IntersectionOf`, `UnionOf`, `ComplementOf`, `OneOf`, `Inverse` | complex |
-| `SomeValuesFrom`, `AllValuesFrom`, `ExactCardinality`, `HasValue` | XPS |
-| `MinCardinality`, `MaxCardinality`, `HasSelf` | complex |
-| `Fact`, `Type`, `SameAs`, `DifferentFrom`, `AllDifferent` | complex |
-| `Annotation` | all examples |
-| property characteristics | simple, sensor, and complex |
+| attribute-only external and local properties | [attributes_only.schema.py](examples/attributes_only.schema.py) |
+| combined class and attribute mappings | [class_and_attributes.schema.py](examples/class_and_attributes.schema.py) |
+| subsection and child attributes | [subsections_and_attributes.schema.py](examples/subsections_and_attributes.schema.py) |
+| external-first XPS workflow | [xps_measurement.schema.py](examples/xps_measurement.schema.py) |
+| SOSA/QUDT observation workflow | [sensor_observation.schema.py](examples/sensor_observation.schema.py) |
+| minimal sample onboarding | [simple_sample.schema.py](examples/simple_sample.schema.py) |
+| explicit class hierarchy | [class_hierarchy.schema.py](examples/class_hierarchy.schema.py) |
+| class-only mapping | [class_only.schema.py](examples/class_only.schema.py) |
+| sections as relation endpoints | [section_object_relations.schema.py](examples/section_object_relations.schema.py) |
+| intersections, unions, and complements | [defined_classes.schema.py](examples/defined_classes.schema.py) |
+| property hierarchy, inverse, and chain | [property_axioms.schema.py](examples/property_axioms.schema.py) |
+| datatype restrictions | [data_restrictions.schema.py](examples/data_restrictions.schema.py) |
+| individuals and assertions | [individuals_and_facts.schema.py](examples/individuals_and_facts.schema.py) |
+| broad OWL axiom families | [owl_axioms.schema.py](examples/owl_axioms.schema.py) |
 
-The SOSA/QUDT companion is
-[examples/sensor_observation.schema.py](examples/sensor_observation.schema.py).
+| Grammar family | Demonstrated in |
+| --- | --- |
+| declarations: `Class`, property kinds, `Individual` | simple, attributes, individuals |
+| class axioms and Boolean expressions | hierarchy, defined classes, OWL axioms |
+| property axioms and characteristics | property axioms, sensor |
+| object/data restrictions and cardinalities | XPS, data restrictions, OWL axioms |
+| facts, types, equality, and inequality | individuals and facts, OWL axioms |
+| annotations | all full examples |
 
-### 3.4 Placement-specific patterns
-
-These examples answer a separate question from OWL expressiveness: **where may a
-mapping be attached in a NOMAD schema?**
-
-#### Class mapping only
-
-In [class_only.schema.py](examples/class_only.schema.py), attributes remain ordinary
-NOMAD definitions. The OWL hierarchy exists only because both semantic operations
-are written explicitly:
-
-```python
-@OntologyMap([
-    Class(iri="https://nomad-lab.eu/onto/examples#XpsActivity"),
-    SubClassOf(iri="ResearchActivity"),  # internal mapping handle
-])
-class XpsActivity(ResearchActivity):
-    beam_energy = Quantity(type=float)  # no mapping, therefore no OWL property
-```
-
-```turtle
-:XpsActivity a owl:Class ; rdfs:subClassOf :ResearchActivity .
-```
-
-The Python inheritance happens to look similar, but the compiler does not read it.
-Removing `SubClassOf` removes the OWL relationship while leaving Python unchanged.
-
-#### Attribute mapping only
-
-In [attributes_only.schema.py](examples/attributes_only.schema.py), the containing
-Python class has no semantic declaration. Its mapped attributes still create OWL
-properties. One has external domain/range cross-maps, one directly reuses an
-external property, and one intentionally has no domain/range:
-
-```python
-class MeasurementRecord(MSection):  # no Class(...) declaration
-    result = OntologyMap([
-        ObjectProperty(iri="https://nomad-lab.eu/onto/examples#hasResult"),
-        Domain(iri="http://www.w3.org/ns/prov#Activity"),
-        Range(iri="http://www.w3.org/ns/prov#Entity"),
-    ])(Quantity(type=str))
-
-    free_text = OntologyMap([
-        DataProperty(iri="https://nomad-lab.eu/onto/examples#freeText"),
-        # Deliberately no domain or range.
-    ])(Quantity(type=str))
-```
-
-```turtle
-:hasResult a owl:ObjectProperty ;
-    rdfs:domain prov:Activity ; rdfs:range prov:Entity .
-:freeText a owl:DatatypeProperty .
-```
-
-No OWL class is generated for `MeasurementRecord`.
-
-#### Class and attribute mappings together
-
-[class_and_attributes.schema.py](examples/class_and_attributes.schema.py) combines
-local classes, a local property whose domain/range reference those classes, and
-direct reuse of `prov:used`:
-
-```python
-result = OntologyMap([
-    ObjectProperty(
-        iri="https://nomad-lab.eu/onto/examples#hasResult",
-        domain=["Measurement"],
-        range=["Result"],
-    ),
-])(SubSection(sub_section="Result"))
-```
-
-The mapping declares the `result` relation. It does not declare the `SubSection`
-instance as an OWL object.
-
-#### Subsection and child-attribute mappings
-
-[subsections_and_attributes.schema.py](examples/subsections_and_attributes.schema.py)
-maps a repeating subsection relation and then independently maps fields inside the
-child section:
-
-```python
-results = OntologyMap([
-    ObjectProperty(
-        iri="https://nomad-lab.eu/onto/examples#hasResult",
-        domain=["Experiment"], range=["Result"],
-    ),
-])(SubSection(sub_section="Result", repeats=True))
-```
-
-```turtle
-:hasResult a owl:ObjectProperty ;
-    rdfs:domain :Experiment ; rdfs:range :Result .
-:numericValue a owl:DatatypeProperty ;
-    rdfs:domain :Result ; rdfs:range xsd:double .
-```
-
-`results` is the semantic property handle; `SubSection(...)` remains NOMAD grammar.
-
-### 3.5 Additional class-centered modeling examples
-
-The following executable files focus on semantic structures that are easy to miss
-when looking only at attribute-property examples:
-
-- [class_hierarchy.schema.py](examples/class_hierarchy.schema.py) declares an OWL
-  hierarchy independently of a deliberately different Python inheritance tree.
-- [section_object_relations.schema.py](examples/section_object_relations.schema.py)
-  turns explicitly mapped NOMAD sections into the domain and range of object
-  properties, including a repeating subsection relation.
-- [defined_classes.schema.py](examples/defined_classes.schema.py) defines classes
-  through intersections, unions, complements, and nested restrictions.
-- [property_axioms.schema.py](examples/property_axioms.schema.py) treats relations as
-  a property ontology with subproperties, inverse properties, characteristics, and
-  a property chain.
-- [data_restrictions.schema.py](examples/data_restrictions.schema.py) applies
-  universal, exact, minimum, maximum, and literal-value restrictions to data
-  properties.
-- [individuals_and_facts.schema.py](examples/individuals_and_facts.schema.py)
-  declares named individuals and connects them using object/data facts, additional
-  types, equality, and inequality.
-
-For example, using mapped sections as object-property endpoints is explicit:
-
-```python
-@OntologyMap([Class(iri="https://nomad-lab.eu/onto/section-example#Experiment")])
-class Experiment(MSection):
-    instrument = OntologyMap([
-        ObjectProperty(
-            iri="https://nomad-lab.eu/onto/section-example#hasInstrument",
-            domain=["Experiment"],
-            range=["Instrument"],
-        ),
-    ])(Quantity(type="Instrument"))
-```
-
-```turtle
-:Experiment a owl:Class .
-:Instrument a owl:Class .
-:hasInstrument a owl:ObjectProperty ;
-    rdfs:domain :Experiment ;
-    rdfs:range :Instrument .
-```
-
-The ontology uses the mapped section classes. It does not turn the assigned NOMAD
-`Quantity` into an OWL individual, class, or property.
+The generated end-to-end XPS graph is [ontology.ttl](ontology.ttl). It is output,
+not hand-authored input.
 
 ## 4. Validation, reports, and failure behavior
 
@@ -578,7 +911,17 @@ A successful run means serialization completed and the selected checks passed. I
 does not prove the scientific intent of every mapping. Review the report and run an
 OWL-profile-specific conformance suite before publishing critical ontologies.
 
+## 5. Specifications and implementation references
 
+- [OWL 2 Structural Specification](https://www.w3.org/TR/owl2-syntax/)
+- [OWL 2 Mapping to RDF Graphs](https://www.w3.org/TR/owl2-mapping-to-rdf/)
+- [OWL 2 Conformance](https://www.w3.org/TR/owl2-conformance/)
+- [Owlready2 documentation](https://owlready2.readthedocs.io/)
+- [PROV-O](https://www.w3.org/TR/prov-o/)
+- [SOSA/SSN](https://www.w3.org/TR/vocab-ssn/)
+- [DCAT 3](https://www.w3.org/TR/vocab-dcat-3/)
+- [DCMI Metadata Terms](https://www.dublincore.org/specifications/dublin-core/dcmi-terms/)
+- [QUDT](https://www.qudt.org/)
 
 For maintainers extending the grammar or pipeline, continue with
 [TECHNICAL.md](TECHNICAL.md).
